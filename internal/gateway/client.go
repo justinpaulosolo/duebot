@@ -121,7 +121,10 @@ func (c *Client) connectAndResume() error {
 
 func (c *Client) readHello() (helloData, error) {
 	var p Payload
-	if err := c.conn.ReadJSON(&p); err != nil {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if err := conn.ReadJSON(&p); err != nil {
 		return helloData{}, fmt.Errorf("reading hello: %w", err)
 	}
 	if p.Op != OpHello {
@@ -163,12 +166,17 @@ func (c *Client) runSocket() error {
 
 	for {
 		var p Payload
-		if err := c.conn.ReadJSON(&p); err != nil {
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		if err := conn.ReadJSON(&p); err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
 
 		if p.S != nil {
+			c.mu.Lock()
 			c.seq = p.S
+			c.mu.Unlock()
 		}
 
 		switch p.Op {
@@ -179,16 +187,20 @@ func (c *Client) runSocket() error {
 				return err
 			}
 		case OpHeartbeatACK:
+			c.mu.Lock()
 			c.lastAckReceived = true
+			c.mu.Unlock()
 		case OpReconnect:
 			return fmt.Errorf("server requested reconnect")
 		case OpInvalidSession:
 			var resumable bool
 			_ = json.Unmarshal(p.D, &resumable)
 			if !resumable {
+				c.mu.Lock()
 				c.sessionID = ""
 				c.resumeURL = ""
 				c.seq = nil
+				c.mu.Unlock()
 			}
 			return fmt.Errorf("invalid session (resumable=%v)", resumable)
 		}
@@ -203,7 +215,10 @@ func (c *Client) heartbeatLoop(stop chan struct{}) {
 		case <-stop:
 			return
 		case <-ticker.C:
-			if !c.lastAckReceived {
+			c.mu.Lock()
+			lastAck := c.lastAckReceived
+			c.mu.Unlock()
+			if !lastAck {
 				// discord didnt ack force a reconnect
 				c.mu.Lock()
 				if c.conn != nil {
@@ -212,7 +227,9 @@ func (c *Client) heartbeatLoop(stop chan struct{}) {
 				c.mu.Unlock()
 				return
 			}
+			c.mu.Lock()
 			c.lastAckReceived = false
+			c.mu.Unlock()
 			if err := c.sendHeartbeat(); err != nil {
 				return
 			}
@@ -222,9 +239,11 @@ func (c *Client) heartbeatLoop(stop chan struct{}) {
 
 func (c *Client) sendHeartbeat() error {
 	var seq interface{}
+	c.mu.Lock()
 	if c.seq != nil {
 		seq = *c.seq
 	}
+	c.mu.Unlock()
 	return c.send(OpHeartbeat, seq)
 }
 
@@ -253,8 +272,10 @@ func (c *Client) handleDispatch(p Payload) {
 			log.Printf("gateway: bad READY payload: %v", err)
 			return
 		}
+		c.mu.Lock()
 		c.sessionID = r.SessionID
 		c.resumeURL = r.ResumeGatewayURL
+		c.mu.Unlock()
 		log.Printf("gateway: ready, session %s", r.SessionID)
 
 	case "MESSAGE_CREATE":
