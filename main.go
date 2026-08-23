@@ -43,9 +43,11 @@ func main() {
 		}
 	}
 
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := client.Run(); err != nil {
-			log.Fatalf("gateway client stopped: %v", err)
+			log.Printf("gateway client stopped: %v", err)
 		}
 	}()
 
@@ -60,4 +62,5 @@ func main() {
 	<-sig
 	log.Println("shutting down")
 	client.Close()
+	<-done
 }

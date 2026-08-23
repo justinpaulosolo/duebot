@@ -52,6 +52,17 @@ func (c *Client) Run() error {
 			err = c.connectAndIdentify()
 		}
 		if err != nil {
+			select {
+			case <-c.closed:
+				return nil
+			default:
+			}
+			c.mu.Lock()
+			if c.conn != nil {
+				c.conn.Close()
+			}
+			c.mu.Unlock()
+
 			if time.Since(connectStart) >= stableConnectionThreshold {
 				c.reconnectFailures = 0
 			} else {
@@ -59,8 +70,12 @@ func (c *Client) Run() error {
 			}
 			delay := backoffDelay(c.reconnectFailures)
 			log.Printf("gateway: connection ended: %v — reconnecting in %s", err, delay)
-			time.Sleep(delay)
-			continue
+
+			select {
+			case <-c.closed:
+				return nil
+			case <-time.After(delay):
+			}
 		}
 	}
 }
@@ -316,6 +331,7 @@ func (c *Client) handleDispatch(p Payload) {
 	if p.T == nil {
 		return
 	}
+	log.Printf("gateway: received dispatch: %s", *p.T)
 	switch *p.T {
 	case "READY":
 		var r ReadyData
