@@ -178,8 +178,8 @@ func (c *Client) identify() error {
 		Intents: c.Intents,
 		Properties: identifyProps{
 			OS:      "linux",
-			Browser: "canvasbot",
-			Device:  "canvasbot",
+			Browser: "duebot",
+			Device:  "duebot",
 		},
 	}
 	return c.send(OpIdentify, id)
