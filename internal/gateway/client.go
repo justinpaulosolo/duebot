@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -29,6 +30,8 @@ type Client struct {
 	heartbeatInterval time.Duration
 	lastAckReceived   bool
 
+	reconnectFailures int
+
 	closed chan struct{}
 }
 
@@ -41,6 +44,7 @@ func (c *Client) Run() error {
 		default:
 		}
 
+		connectStart := time.Now()
 		var err error
 		if c.sessionID != "" && c.resumeURL != "" {
 			err = c.connectAndResume()
@@ -48,11 +52,42 @@ func (c *Client) Run() error {
 			err = c.connectAndIdentify()
 		}
 		if err != nil {
-			log.Printf("gateway: connection ended: %v — reconnecting in 3s", err)
-			time.Sleep(3 * time.Second)
+			if time.Since(connectStart) >= stableConnectionThreshold {
+				c.reconnectFailures = 0
+			} else {
+				c.reconnectFailures++
+			}
+			delay := backoffDelay(c.reconnectFailures)
+			log.Printf("gateway: connection ended: %v — reconnecting in %s", err, delay)
+			time.Sleep(delay)
 			continue
 		}
 	}
+}
+
+const (
+	// stableConnectionThreshold is how long a connection must stay up before
+	// a subsequent failure is treated as a fresh failure streak rather than
+	// a continuation of prior failures.
+	stableConnectionThreshold = 60 * time.Second
+	baseReconnectDelay        = 3 * time.Second
+	maxReconnectDelay         = 2 * time.Minute
+)
+
+// backoffDelay returns an exponential backoff delay based on the number of
+// consecutive failures, capped at maxReconnectDelay.
+func backoffDelay(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	delay := baseReconnectDelay
+	for i := 1; i < failures; i++ {
+		delay *= 2
+		if delay >= maxReconnectDelay {
+			return maxReconnectDelay
+		}
+	}
+	return delay
 }
 
 func (c *Client) Close() {
@@ -208,6 +243,22 @@ func (c *Client) runSocket() error {
 }
 
 func (c *Client) heartbeatLoop(stop chan struct{}) {
+	initialDelay := time.Duration(float64(c.heartbeatInterval) * (0 + (1-0)*rand.Float64()))
+	timer := time.NewTimer(initialDelay)
+	defer timer.Stop()
+	select {
+	case <-stop:
+		return
+	case <-timer.C:
+	}
+
+	c.mu.Lock()
+	c.lastAckReceived = false
+	c.mu.Unlock()
+	if err := c.sendHeartbeat(); err != nil {
+		return
+	}
+
 	ticker := time.NewTicker(c.heartbeatInterval)
 	defer ticker.Stop()
 	for {
